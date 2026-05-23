@@ -1,0 +1,165 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>情感对话系统</title>
+    <style>
+        body { font-family: 'Microsoft YaHei', sans-serif; text-align: center; margin: 50px; background: #f0f2f5; }
+        .container { max-width: 600px; margin: auto; background: white; padding: 30px; border-radius: 20px; box-shadow: 0 4px 12px rgba(0,0,0,0.1); }
+        button { background-color: #007bff; color: white; border: none; padding: 12px 24px; font-size: 18px; border-radius: 30px; cursor: pointer; margin: 10px; transition: 0.2s; }
+        button:hover { background-color: #0056b3; }
+        button:disabled { background-color: #aaa; cursor: not-allowed; }
+        #status { margin: 20px 0; font-size: 16px; color: #555; }
+        #responseText { margin: 20px 0; padding: 15px; background: #e9ecef; border-radius: 15px; font-size: 18px; color: #333; }
+        audio { width: 100%; margin-top: 15px; }
+        .history { margin-top: 30px; text-align: left; border-top: 1px solid #ddd; padding-top: 15px; }
+        .history p { background: #f8f9fa; padding: 8px; border-radius: 8px; }
+    </style>
+</head>
+<body>
+<div class="container">
+    <h2>🎙️ 情感对话机器人</h2>
+    <p>点击下方按钮开始说话（最长5秒）</p>
+    <button id="recordBtn">🎤 开始录音</button>
+    <div id="status">准备就绪</div>
+    <div id="responseText"></div>
+    <audio id="audioPlayer" controls autoplay style="display: none;"></audio>
+    <div class="history"><h3>对话记录</h3><div id="history"></div></div>
+</div>
+
+<script>
+    (function() {
+        const SAMPLE_RATE = 22050;      // 必须与训练时一致
+        const RECORD_SECONDS = 5;
+        let mediaStream = null;
+        let audioContext = null;
+        let sourceNode = null;
+        let recorderNode = null;
+        let isRecording = false;
+        let audioChunks = [];
+
+        const recordBtn = document.getElementById('recordBtn');
+        const statusDiv = document.getElementById('status');
+        const responseDiv = document.getElementById('responseText');
+        const audioPlayer = document.getElementById('audioPlayer');
+        const historyDiv = document.getElementById('history');
+
+        function float32ToWav(samples, sampleRate) {
+            const buffer = new ArrayBuffer(44 + samples.length * 2);
+            const view = new DataView(buffer);
+            function writeString(offset, str) {
+                for (let i = 0; i < str.length; i++) view.setUint8(offset + i, str.charCodeAt(i));
+            }
+            writeString(0, 'RIFF');
+            view.setUint32(4, 36 + samples.length * 2, true);
+            writeString(8, 'WAVE');
+            writeString(12, 'fmt ');
+            view.setUint32(16, 16, true);
+            view.setUint16(20, 1, true);
+            view.setUint16(22, 1, true);
+            view.setUint32(24, sampleRate, true);
+            view.setUint32(28, sampleRate * 2, true);
+            view.setUint16(32, 2, true);
+            view.setUint16(34, 16, true);
+            writeString(36, 'data');
+            view.setUint32(40, samples.length * 2, true);
+            let offset = 44;
+            for (let i = 0; i < samples.length; i++) {
+                let s = Math.max(-1, Math.min(1, samples[i]));
+                let intVal = s < 0 ? s * 0x8000 : s * 0x7FFF;
+                view.setInt16(offset, intVal, true);
+                offset += 2;
+            }
+            return new Blob([buffer], { type: 'audio/wav' });
+        }
+
+        async function startRecording() {
+            if (isRecording) return;
+            try {
+                mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: SAMPLE_RATE });
+                sourceNode = audioContext.createMediaStreamSource(mediaStream);
+                recorderNode = audioContext.createScriptProcessor(4096, 1, 1);
+                sourceNode.connect(recorderNode);
+                recorderNode.connect(audioContext.destination);
+                audioChunks = [];
+                recorderNode.onaudioprocess = (event) => {
+                    if (!isRecording) return;
+                    const inputData = event.inputBuffer.getChannelData(0);
+                    const copy = new Float32Array(inputData.length);
+                    copy.set(inputData);
+                    audioChunks.push(copy);
+                };
+                isRecording = true;
+                audioContext.resume();
+                statusDiv.textContent = `录音中... 最长 ${RECORD_SECONDS} 秒`;
+                recordBtn.disabled = true;
+                setTimeout(() => {
+                    if (isRecording) stopRecordingAndSend();
+                }, RECORD_SECONDS * 1000);
+            } catch (err) {
+                console.error(err);
+                statusDiv.textContent = '无法获取麦克风权限';
+                recordBtn.disabled = false;
+            }
+        }
+
+        async function stopRecordingAndSend() {
+            if (!isRecording) return;
+            isRecording = false;
+            statusDiv.textContent = '正在处理...';
+            if (recorderNode) recorderNode.disconnect();
+            if (sourceNode) sourceNode.disconnect();
+            if (audioContext) await audioContext.close();
+            if (mediaStream) mediaStream.getTracks().forEach(track => track.stop());
+
+            let totalLength = audioChunks.reduce((sum, chunk) => sum + chunk.length, 0);
+            let combined = new Float32Array(totalLength);
+            let offset = 0;
+            for (let chunk of audioChunks) {
+                combined.set(chunk, offset);
+                offset += chunk.length;
+            }
+            const wavBlob = float32ToWav(combined, SAMPLE_RATE);
+            const formData = new FormData();
+            formData.append('audio', wavBlob, 'user_audio.wav');
+
+            try {
+                const emotionRes = await fetch('/emotion', { method: 'POST', body: formData });
+                if (!emotionRes.ok) throw new Error('情感识别失败');
+                const emotionData = await emotionRes.json();
+                const emotion = emotionData.emotion;
+                statusDiv.textContent = `识别情感：${emotion}，正在生成回复...`;
+                responseDiv.innerHTML = `🎭 识别情感：${emotion}`;
+                const replyRes = await fetch('/reply', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ emotion: emotion })
+                });
+                if (!replyRes.ok) throw new Error('回复生成失败');
+                const audioBlobReply = await replyRes.blob();
+                const audioUrl = URL.createObjectURL(audioBlobReply);
+                audioPlayer.src = audioUrl;
+                audioPlayer.style.display = 'block';
+                audioPlayer.play();
+                responseDiv.innerHTML = `🎭 识别情感：${emotion}<br>🤖 回复已播放`;
+                const now = new Date().toLocaleTimeString();
+                const historyItem = document.createElement('p');
+                historyItem.innerHTML = `<strong>${now}</strong><br>你：[语音输入]<br>机器人：[语音回复 - ${emotion}情绪]`;
+                historyDiv.prepend(historyItem);
+                statusDiv.textContent = '处理完成，可继续录音';
+            } catch (err) {
+                console.error(err);
+                statusDiv.textContent = '处理出错，请重试';
+                responseDiv.innerHTML = '抱歉，发生了错误。';
+            } finally {
+                recordBtn.disabled = false;
+            }
+        }
+
+        recordBtn.onclick = startRecording;
+    })();
+</script>
+</body>
+</html>
