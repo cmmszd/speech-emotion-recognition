@@ -107,21 +107,6 @@ A: 减小 batch_size 或输入特征维度。
 - 优化模型大小，部署到移动端
 
 ## 作者
-
 丁梦琳
 
-## 许可证
-
-MIT
-```
-## 如何添加到项目
-1. 在项目根目录（`D:\SpeechEmotionRecognition\`）新建一个文本文件，命名为 `README.md`
-2. 将上面的内容复制进去并保存
-3. 提交到 GitHub：
-
-```bash
-git add README.md
-git commit -m "添加项目 README"
-git push
-```
 
